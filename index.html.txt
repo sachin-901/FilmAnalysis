@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Hospital-Grade Film/EPID QA</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    body { font-family: Arial; padding: 16px; }
+    canvas { border:1px solid #333; cursor: crosshair; margin-top:10px; }
+    .pass { color:green; font-weight:bold; }
+    .fail { color:red; font-weight:bold; }
+    .section { margin-top:14px; }
+  </style>
+</head>
+<body>
+
+<h2>Hospital-Grade Film / EPID QA Tool</h2>
+
+<div class="section">
+Upload Image:
+<input type="file" id="upload" accept=".jpg,.jpeg,.png,.tif,.tiff">
+Scanner DPI:
+<input type="number" id="dpi" value="200">
+</div>
+
+<div class="section">
+<b>Manual Mode</b><br>
+Row (Horizontal line): <input type="number" id="manual_hor">
+Column (Vertical line): <input type="number" id="manual_ver">
+<button onclick="manualAnalyze()">Use Manual Values</button>
+<p>Or click image: 1st click = horizontal line, 2nd = vertical line</p>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<div class="section">
+<h3>Results</h3>
+<pre id="results"></pre>
+<button onclick="savePDF()">Save PDF QA Report</button>
+</div>
+
+<script>
+let arr=[], w=0, h=0;
+let cx=0, cy=0;
+let clickStep=0;
+let originalImage=null;
+
+document.getElementById('upload').addEventListener('change', e=>{
+  const file=e.target.files[0];
+  const img=new Image();
+  img.onload=function(){
+    originalImage=img;
+    const canvas=document.getElementById('canvas');
+    const ctx=canvas.getContext('2d');
+    canvas.width=img.width;
+    canvas.height=img.height;
+    w=img.width; h=img.height;
+    ctx.drawImage(img,0,0);
+
+    const data=ctx.getImageData(0,0,w,h).data;
+    arr=[];
+    for(let y=0;y<h;y++){
+      let row=[];
+      for(let x=0;x<w;x++){
+        let i=(y*w+x)*4;
+        let gray=(data[i]+data[i+1]+data[i+2])/3;
+        row.push(255-gray);
+      }
+      arr.push(row);
+    }
+    autoAnalyze();
+  };
+  img.src=URL.createObjectURL(file);
+});
+
+function autoAnalyze(){
+  let bg=(arr[5][5]+arr[5][w-6]+arr[h-6][5]+arr[h-6][w-6])/4;
+  for(let y=0;y<h;y++)
+    for(let x=0;x<w;x++)
+      arr[y][x]-=bg;
+
+  let max=0;
+  for(let y=0;y<h;y++)
+    for(let x=0;x<w;x++)
+      if(arr[y][x]>max){max=arr[y][x];cx=x;cy=y;}
+
+  analyze(cx,cy);
+}
+
+function manualAnalyze(){
+  let hor=parseInt(document.getElementById('manual_hor').value);
+  let ver=parseInt(document.getElementById('manual_ver').value);
+  if(!isNaN(hor)&&!isNaN(ver)){
+    cy=hor; cx=ver;
+    analyze(cx,cy);
+  }
+}
+
+document.getElementById('canvas').addEventListener('click',e=>{
+  let rect=e.target.getBoundingClientRect();
+  let x=Math.floor(e.clientX-rect.left);
+  let y=Math.floor(e.clientY-rect.top);
+
+  if(clickStep===0){ cy=y; clickStep=1; }
+  else { cx=x; clickStep=0; analyze(cx,cy); }
+});
+
+function getIndices(arr,thr){
+  let out=[];
+  for(let i=0;i<arr.length;i++)
+    if(arr[i]>=thr) out.push(i);
+  return out;
+}
+
+function analyze(cx,cy){
+  const dpi=parseFloat(document.getElementById('dpi').value);
+  const dot=2.54/dpi;
+
+  let hor=arr[cy].slice();
+  let ver=arr.map(r=>r[cx]);
+
+  let max=Math.max(...hor);
+  hor=hor.map(v=>v/max);
+  ver=ver.map(v=>v/max);
+
+  let h20=getIndices(hor,0.2), h80=getIndices(hor,0.8);
+  let v20=getIndices(ver,0.2), v80=getIndices(ver,0.8);
+
+  let left_pen=(h80[0]-h20[0])*dot*10;
+  let right_pen=(h20[h20.length-1]-h80[h80.length-1])*dot*10;
+  let top_pen=(v80[0]-v20[0])*dot*10;
+  let bottom_pen=(v20[v20.length-1]-v80[v80.length-1])*dot*10;
+
+  let h50=getIndices(hor,0.5);
+  let v50=getIndices(ver,0.5);
+
+  let fieldX=(h50[h50.length-1]-h50[0])*dot;
+  let fieldY=(v50[v50.length-1]-v50[0])*dot;
+
+  let x1=h50[0], x2=h50[h50.length-1];
+  let y1=v50[0], y2=v50[v50.length-1];
+
+  let cxm=Math.floor((x1+x2)/2);
+  let cym=Math.floor((y1+y2)/2);
+  let dx=Math.floor((x2-x1)*0.4);
+  let dy=Math.floor((y2-y1)*0.4);
+
+  let values=[];
+  for(let y=cym-dy;y<cym+dy;y++)
+    for(let x=cxm-dx;x<cxm+dx;x++)
+      values.push(arr[y][x]);
+
+  let flat_max=Math.max(...values);
+  let flat_min=Math.min(...values);
+  let flatness=100*(flat_max-flat_min)/(flat_max+flat_min);
+
+  let left=0,right=0,top=0,bottom=0;
+
+  for(let y=cym-dy;y<cym+dy;y++){
+    for(let x=cxm-dx;x<cxm;x++) left+=arr[y][x];
+    for(let x=cxm;x<cxm+dx;x++) right+=arr[y][x];
+  }
+
+  for(let y=cym-dy;y<cym;y++)
+    for(let x=cxm-dx;x<cxm+dx;x++) top+=arr[y][x];
+
+  for(let y=cym;y<cym+dy;y++)
+    for(let x=cxm-dx;x<cxm+dx;x++) bottom+=arr[y][x];
+
+  let LR=100*Math.abs(left-right)/(left+right);
+  let GT=100*Math.abs(top-bottom)/(top+bottom);
+
+  let flatPass=flatness<=3;
+  let symPass=(LR<=2 && GT<=2);
+
+  document.getElementById('results').innerHTML=`
+CENTER: (${cx},${cy})
+
+Penumbra (mm):
+Left: ${left_pen.toFixed(2)}
+Right: ${right_pen.toFixed(2)}
+Top: ${top_pen.toFixed(2)}
+Bottom: ${bottom_pen.toFixed(2)}
+
+Field Size:
+X=${fieldX.toFixed(2)} cm
+Y=${fieldY.toFixed(2)} cm
+
+Flatness: ${flatness.toFixed(2)} %
+TG-142 Flatness: <span class="${flatPass?'pass':'fail'}">${flatPass?'PASS':'FAIL'}</span>
+
+Symmetry LR: ${LR.toFixed(2)} %
+Symmetry GT: ${GT.toFixed(2)} %
+TG-142 Symmetry: <span class="${symPass?'pass':'fail'}">${symPass?'PASS':'FAIL'}</span>
+`;
+
+  drawLines(cx,cy);
+}
+
+function drawLines(cx,cy){
+  const canvas=document.getElementById('canvas');
+  const ctx=canvas.getContext('2d');
+  ctx.drawImage(originalImage,0,0);
+
+  ctx.strokeStyle="red";
+  ctx.beginPath(); ctx.moveTo(0,cy); ctx.lineTo(w,cy); ctx.stroke();
+
+  ctx.strokeStyle="blue";
+  ctx.beginPath(); ctx.moveTo(cx,0); ctx.lineTo(cx,h); ctx.stroke();
+}
+
+function savePDF(){
+  const { jsPDF } = window.jspdf;
+  const doc=new jsPDF();
+  doc.text("Film QA Report",10,10);
+  doc.text(document.getElementById('results').innerText,10,20);
+  const canvas=document.getElementById('canvas');
+  const img=canvas.toDataURL("image/png");
+  doc.addImage(img,"PNG",10,60,180,120);
+  doc.save("Hospital_QA_Report.pdf");
+}
+</script>
+</body>
+</html>
